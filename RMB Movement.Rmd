@@ -1,0 +1,211 @@
+---
+title: "RMB Movement"
+#runtime: shiny
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r inputs, include = T} 
+StartDate <- as.Date("2008-01-01")
+EndDate <- as.Date(Sys.Date())
+IndexStartDate<- as.Date("2015-08-15")
+
+```
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+library(shiny)
+library(quantmod)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(xts)
+library(stats)
+library(stringr)
+setwd('/Users/LDai/Documents')
+```
+
+```{r getting data, eval=T, include=F} 
+options(warn = -1)
+# Getting necessary data for further analysis
+#get the data from yahoo finance
+getSymbols('CNYUSD=X')
+getSymbols('DX-Y.NYB')
+getSymbols("CHNRECM", src = 'FRED')
+
+#tidy the data 
+df1 <- `CNYUSD=X`
+df2 <- `DX-Y.NYB`
+df3 <- `CHNRECM`
+
+df1 <- data.frame(df1, stringsAsFactors = F)
+colnames(df1) <- c('Open', 'High', 'Low', 'Close', 'Volume', 'Adjusted')
+df2 <- data.frame(df2, stringsAsFactors = F)
+colnames(df2) <- c('Open', 'High', 'Low', 'Close', 'Volume', 'Adjusted')
+df3 <- data.frame(df3, stringsAsFactors = F)
+df3 <- rownames_to_column(df3, var = "date")
+colnames(df3) <- c('date', 'CNrecession') 
+
+df1 <- rownames_to_column(df1)
+date <- try(as.Date(df1$rowname))
+if (class(date) == "try-error") {
+ ### only when data frame is corrupted 
+date <- str_sub(df1$rowname, 2)
+date <- as.Date(date, format = "%Y.%m.%d")
+### 
+}
+df1$rowname <- date
+df2 <- rownames_to_column(df2)
+df2$rowname <- as.Date(df2$rowname)
+df3$date <- as.Date(df3$date)
+
+temp <- t(data.frame(as.list(as.Date('2007-01-01'): as.Date(Sys.Date()))))
+colnames(temp) <- 'date'
+rownames(temp) <- NULL
+temp <- data.frame(temp)
+temp$date <- as.Date(temp$date, origin = "1970-01-01")
+
+
+temp$USDCNY <- mapply(function(x){ifelse(is.na(df1$Close[match(x, df1$rowname)]) == F,
+                                         df1$Close[match(x, df1$rowname)], NA)
+                                         }, temp$date)
+temp$DI <- mapply(function(x){ifelse(is.na(df2$Close[match(x, df2$rowname)]) == F,
+                                         df2$Close[match(x, df2$rowname)], NA)
+                                         }, temp$date)
+temp$CNrecession <- mapply(function(x){df3$CNrecession[match(x,df3$date)]}, temp$date)
+                           
+temp <- fill(temp, USDCNY, DI)
+temp <- temp[which(temp$date >= as.Date('2008-01-01')),]
+
+df <- temp
+#adding news to df2
+news <- read.csv("RMB Movement.csv", header = T, stringsAsFactors = F)
+news <- data.frame(lapply(news, as.character), stringsAsFactors = F)
+news <- data.frame(lapply(news, function(x){ifelse(x == "", NA, x)}), stringsAsFactors = F)
+news$date <- as.Date(news$date)
+df2 <- df
+df2$EventCM <- mapply(function(x){ifelse(is.na(news$EventCM[match(x, news$date)])==F,news$EventCM[match(x, news$date)], NA )}, df2$date)
+df2$NewsCM <- mapply(function(x){ifelse(is.na(news$NewsCM[match(x, news$date)])==F,news$NewsCM[match(x, news$date)], NA )}, df2$date)
+df2$NewsNotCM <- mapply(function(x){ifelse(is.na(news$NewsNotCM[match(x, news$date)])==F,news$NewsNotCM[match(x, news$date)], NA )}, df2$date)
+
+dfEventCM <- subset(df2, is.na(df2$EventCM) == F)
+dfNewsCM <- subset(df2, is.na(df2$NewsCM) == F)
+dfNewsNotCM <- subset(df2, is.na(df2$NewsNotCM) == F)
+# remove used variables
+rm(`CNYUSD=X`, `DX-Y.NYB`, df1, df2, temp, date)
+
+```
+ 
+```{r RMB index, eval=T, include=F}
+# create RMB index 
+# create zoo object 
+zoodf <- xts(df[,-1], df[,1])
+zoodf$USDCNY <- as.double(zoodf$USDCNY)
+zoodf$DI <- as.double(zoodf$DI)
+# create extra variable 
+zoodf$lnUSDCNY = log(zoodf$USDCNY)
+zoodf$lnDI = log(zoodf$DI)
+# create a subset for only after currency reform =
+zoodfsub <- subset(zoodf, index(zoodf) >= as.Date('2015-08-15'))
+# regression
+regoutput <- lm(zoodfsub$lnUSDCNY ~ zoodfsub$lnDI)
+# getting the index
+# using residual analysis
+u <- regoutput$residuals
+# create temporary data.frame
+temp <- data.frame(u)
+temp <- rownames_to_column(temp, var = "date")
+temp$date <- as.Date(temp$date)
+temp$Delta <- c(0, diff(temp$u))
+temp$Index <- ((1+temp$u)/(1+temp$u[which(temp$date == IndexStartDate)]))*100
+# adding data to main 
+df$RMBIndex <- mapply(function(x){ifelse(is.na(temp$Index[match(x, temp$date)])==F, temp$Index[match(x, temp$date)], NA)}, df$date)
+
+zoodf <- xts(df[,-1], df[,1])
+RMBIts <- ts(zoodf$RMBIndex, frequency = 365.25)
+DRMBIts <- decompose(RMBIts, type = "multiplicative")
+plot(DRMBIts)
+
+x <- stl(RMBIts, s.window = "periodic", na.action = na.omit)
+plot(x)
+y <- x$time.series
+plot(x$time.series)
+
+y <- data.frame(y)
+y$RMBINS <- y$trend + y$remainder
+y$RMBI <- y$seasonal+y$trend+y$remainder
+
+y <- rownames_to_column(y, var = "date")
+y$date <- as.double(y$date)
+y$date <- as.Date(y$date, origin = "2015-08-14")
+df$RMBIndexNS <- mapply(function(x){y$RMBINS[match(x,y$date)]}, df$date)
+# cleaning global environment
+rm(temp, zoodfsub)
+```
+
+```{r shiny, eval=T, include = F}
+# #Output of the graph
+# #Define UI
+# ui<- fluidpage(
+#   # Creat layout with a sidebar and main area
+#   sidebarLayout(
+#     # Input() function
+#       # data to be shown
+#       # date range
+# 
+#     # Output() function
+#     mainPanel(
+#       plotOutput(outputId = '')
+#     )
+#   )
+# )
+# 
+# server <- function(input, output) {
+#   
+# }
+# 
+# shinyApp(ui = ui, server = server)
+```
+
+```{r plotting, eval =T, echo=F}
+# create graph for analysis
+options(warn=-1)
+#define important values 
+DivisionFactor <- max(c(sd(zoodf$DI)/sd(zoodf$USDCNY), sd(zoodf$RMBIndex, na.rm = T)/sd(zoodf$USDCNY)))
+maxDI <- as.double(max(c(max(zoodf$DI), max(zoodf$RMBIndex, na.rm = T))))
+minDI <- as.double(min(c(min(zoodf$DI), min(zoodf$RMBIndex,na.rm = T))))
+maxFX <- as.double(max(zoodf$USDCNY))
+minFX <- as.double(min(zoodf$USDCNY))
+AdjustmentFactor <- maxFX - maxDI/DivisionFactor 
+
+
+# using ggplot2 to plot the graph 
+CNYgraph <- ggplot(data = df, mapping = aes(x = date)) +
+  geom_line(mapping = aes( y = DI/DivisionFactor+AdjustmentFactor, colour = "Dollar Index")) +
+  geom_line(mapping = aes( y = USDCNY, colour = "USDCNY")) +
+  geom_line(mapping = aes( y = RMBIndex/DivisionFactor+AdjustmentFactor, colour = "RMB Index")) +
+  geom_line(mapping = aes(y = RMBIndexNS/DivisionFactor+AdjustmentFactor, colour = "RMB Index Net Seasonal"))+
+  geom_point(data = dfEventCM, mapping = aes(x = date, y = USDCNY, color = "Major Currency Mainpulation Event"), size = 3) +
+  geom_point(data = dfNewsCM, mapping = aes(x = date, y = USDCNY, color = "Currency Mainplation News"), size = 2) +
+  geom_point(data = dfNewsNotCM, mapping = aes(x = date, y = USDCNY, color = "Not Currency Mainpulation News"), size = 2) +
+  scale_y_continuous(sec.axis = sec_axis(~(. - AdjustmentFactor)*DivisionFactor, name = "Index")) +
+  xlim(as.Date(StartDate), as.Date(EndDate)) +
+  labs(x = "Date", y = "Exchange Rate")
+
+ggplot(data = df, mapping = aes(x = date))+ 
+  geom_line(mapping = aes(y = RMBIndexNS, colour = "RMBINS"))+ 
+  geom_line(mapping = aes(y = RMBIndex, colour = "RMBI"))+ 
+  xlim(as.Date("2019-01-01"), Sys.Date())
+
+ggplot(data = y, mapping = aes(x = index(y))) + 
+  geom_line(mapping = aes(y = seasonal))
+
+
+CNYgraph
+
+```
+
+
+
